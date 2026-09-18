@@ -1,0 +1,14 @@
+.{
+    .name = .musashi88k,
+    .version = "0.1.0",
+    .fingerprint = 0xf7e4fb67af694d80,
+    .minimum_zig_version = "0.14.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "include",
+        "tests",
+        "README.md",
+    },
+}

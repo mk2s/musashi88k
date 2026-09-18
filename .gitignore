@@ -1,0 +1,6 @@
+.zig-cache/
+zig-out/
+zig-out-*/
+.kiro/
+*.pyc
+manual_full.txt

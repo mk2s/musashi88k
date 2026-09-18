@@ -1,0 +1,4 @@
+[
+  {"name":"addu.co carryout", "words":[4102185219], "regs":{"r2":4294967295,"r3":1}, "cf":0, "steps":1},
+  {"name":"cmp 5,3", "words":[4108680198], "regs":{"r5":5,"r6":3}, "cf":0, "steps":1}
+]
