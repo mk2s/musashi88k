@@ -633,6 +633,9 @@ fn memRegister(cpu: *Cpu, inst: u32) StepResult {
     //   0x00 xmem.bu  0x01 xmem      0x02 ld.hu   0x03 ld.bu
     //   0x04 ld.d     0x05 ld        0x06 ld.h    0x07 ld.b (signed)
     //   0x08 st.d     0x09 st        0x0a st.h    0x0b st.b
+    //   0x0c lda.d    0x0d lda(word) 0x0e lda.h   0x0f lda.b
+    // The lda* forms compute an effective address into rD without touching
+    // memory (rD = rS1 + rS2 [* access-size when scaled]).
     const op6 = field(inst, 15, 10);
     const scaled = field(inst, 9, 9) != 0;
     const s1 = cpu.getReg(regS1(inst));
@@ -641,9 +644,9 @@ fn memRegister(cpu: *Cpu, inst: u32) StepResult {
 
     // Scaled index multiplies rS2 by the access size.
     const scale: u32 = switch (op6) {
-        0x04, 0x08 => 8, // double
-        0x01, 0x05, 0x09 => 4, // word / xmem word
-        0x02, 0x06, 0x0a => 2, // half
+        0x04, 0x08, 0x0c => 8, // double (ld.d/st.d/lda.d)
+        0x01, 0x05, 0x09, 0x0d => 4, // word / xmem word / lda
+        0x02, 0x06, 0x0a, 0x0e => 2, // half
         else => 1, // byte
     };
     const ea = if (scaled) s1 +% s2 *% scale else s1 +% s2;
@@ -675,6 +678,8 @@ fn memRegister(cpu: *Cpu, inst: u32) StepResult {
         0x09 => cpu.write32(ea, cpu.getReg(d)), // st (word)
         0x0a => cpu.write16(ea, cpu.getReg(d) & 0xffff), // st.h
         0x0b => cpu.write8(ea, cpu.getReg(d) & 0xff), // st.b
+        // lda* compute the (scaled) effective address into rD; no memory access.
+        0x0c, 0x0d, 0x0e, 0x0f => cpu.setReg(d, ea),
         else => {},
     }
     return .normal;

@@ -33,5 +33,9 @@
   {"name":"add signed overflow traps v9", "r4":123, "exc":9},
   {"name":"sub signed overflow traps v9", "r4":123, "exc":9},
   {"name":"div signed ok both positive", "r4":14, "exc":-1},
-  {"name":"ld.hu/ld.bu/ld.h/ld.b immediate sign/zero-extend", "r4":128, "r5":0, "r6":4294966654, "r7":4294967293, "exc":-1}
+  {"name":"ld.hu/ld.bu/ld.h/ld.b immediate sign/zero-extend", "r4":128, "r5":0, "r6":4294966654, "r7":4294967293, "exc":-1},
+  {"name":"lda.d/lda/lda.h/lda.b scaled register index", "r2":4184, "r5":4140, "r6":4118, "r7":4107, "exc":-1},
+  {"name":"br.n delay slot executes then branch lands", "r2":1, "r3":0, "r4":1, "r5":0, "exc":-1},
+  {"name":"bcnd.n not-taken: delay slot is next sequential insn", "r3":1, "r4":1, "r5":0, "exc":-1},
+  {"name":"bsr.n return addr pc+8 and jmp.n delayed return", "r1":16777224, "r2":1, "r3":1, "r6":1, "exc":-1}
 ]
