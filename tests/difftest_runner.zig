@@ -37,7 +37,7 @@ const Cpu = cpu_mod.Cpu;
 // address is set per-case; all accesses are taken modulo the window size, so
 // tests should keep effective addresses within [load, load+RAM_SIZE).
 const RAM_SIZE: u32 = 1 << 16; // 64 KiB
-var g_ram: [RAM_SIZE]u8 = undefined;
+var g_ram: [RAM_SIZE]u8 = @splat(0);
 var g_base: u32 = 0;
 
 inline fn idx(a: u32) u32 {

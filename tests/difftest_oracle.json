@@ -32,5 +32,6 @@
   {"name":"divu by zero traps v8", "r4":123, "exc":8},
   {"name":"add signed overflow traps v9", "r4":123, "exc":9},
   {"name":"sub signed overflow traps v9", "r4":123, "exc":9},
-  {"name":"div signed ok both positive", "r4":14, "exc":-1}
+  {"name":"div signed ok both positive", "r4":14, "exc":-1},
+  {"name":"ld.hu/ld.bu/ld.h/ld.b immediate sign/zero-extend", "r4":128, "r5":0, "r6":4294966654, "r7":4294967293, "exc":-1}
 ]

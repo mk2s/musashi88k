@@ -122,13 +122,24 @@ fn bitfieldExtractU(v: u32, w: u32, o: u32) u32 {
 }
 
 /// Signed bit-field extract: shift field to the top, arithmetic-shift back.
+///
+/// A width field of 0 encodes width 32 (`ext rD,rS1,0<o5>` extracts bits
+/// [o5..31], i.e. an arithmetic right shift by o5). When `off + width` exceeds
+/// 32 the field runs past bit 31, so only the bits actually present in the
+/// register are used: the field's top is bit 31, `left` clamps to 0, and the
+/// operation reduces to an arithmetic shift right by `off`. The earlier
+/// `32 - width - off` computation underflowed (and panicked) in exactly this
+/// common case; clamp instead.
 fn bitfieldExtractS(v: u32, w: u32, o: u32) u32 {
     const width: u32 = if ((w & 0x1f) == 0) 32 else (w & 0x1f);
     const off = o & 0x1f;
-    const left: u5 = @intCast(32 - width - off);
-    const shifted: u32 = v << left;
-    const back: u5 = @intCast(left + off);
-    const s: i32 = @bitCast(shifted);
+    // Bits above the field (to the left of its MSB) once positioned at bit 31.
+    // Clamp to 0 when the field reaches or passes bit 31.
+    const left_u: u32 = if (off + width >= 32) 0 else 32 - width - off;
+    const left: u5 = @intCast(left_u);
+    // Arithmetic shift amount to right-justify with sign extension.
+    const back: u5 = @intCast(left_u + off);
+    const s: i32 = @bitCast(v << left);
     return @bitCast(s >> back);
 }
 
@@ -221,8 +232,8 @@ fn execute(cpu: *Cpu, inst: u32) StepResult {
         // ---- lda immediate forms (compute effective address) ----
         0b001100, 0b001101, 0b001110, 0b001111 => setD(cpu, inst, cpu.getReg(regS1(inst)) +% imm16(inst)),
 
-        // ---- xmem (0x00,0x01), load (0x04-0x07), store (0x08-0x0b) ----
-        0x00, 0x01, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b => return memImmediate(cpu, inst),
+        // ---- xmem (0x00,0x01), load (0x02,0x03,0x04-0x07), store (0x08-0x0b) ----
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b => return memImmediate(cpu, inst),
 
         // ---- Branches ----
         0b110000 => branchNow(cpu, brTarget(cpu, inst)), // br
@@ -366,16 +377,17 @@ fn bcnd(cpu: *Cpu, inst: u32, delayed: bool) void {
 /// Dispatch is on the full primary opcode op1 (bits 31..26), matching the
 /// SLEIGH encodings exactly:
 ///   0x00 xmem.bu   0x01 xmem (word)
-///   0x04 ld.d      0x05 ld        0x06 ld.h/ld.hu   0x07 ld.b/ld.bu
+///   0x02 ld.hu     0x03 ld.bu     0x04 ld.d         0x05 ld
+///   0x06 ld.h      0x07 ld.b      (0x06/0x07 sign-extend)
 ///   0x08 st.d      0x09 st        0x0a st.h         0x0b st.b
 /// (0x0c..0x0f lda immediate forms are handled directly in execute()).
-/// For sub-word loads, bits 29..28 == 0b01 means signed, 0b00 unsigned.
+/// The primary opcode itself selects signedness for sub-word loads:
+/// 0x02/0x03 zero-extend (unsigned), 0x06/0x07 sign-extend.
 fn memImmediate(cpu: *Cpu, inst: u32) StepResult {
     const primary = op1(inst);
     const s1 = cpu.getReg(regS1(inst));
     const ea = s1 +% imm16(inst);
     const d = regD(inst);
-    const signed = field(inst, 29, 28) == 0b01;
 
     switch (primary) {
         0x00 => { // xmem.bu
@@ -388,19 +400,15 @@ fn memImmediate(cpu: *Cpu, inst: u32) StepResult {
             cpu.write32(ea, cpu.getReg(d));
             cpu.setReg(d, old);
         },
+        0x02 => cpu.setReg(d, cpu.read16(ea)), // ld.hu (zero-extend)
+        0x03 => cpu.setReg(d, cpu.read8(ea)), // ld.bu (zero-extend)
         0x04 => { // ld.d (big-endian pair: rD = MS word, rD+1 = LS word)
             cpu.setReg(d, cpu.read32(ea));
             cpu.setReg(d +% 1, cpu.read32(ea +% 4));
         },
         0x05 => cpu.setReg(d, cpu.read32(ea)), // ld (word)
-        0x06 => { // ld.h / ld.hu
-            const v = cpu.read16(ea);
-            cpu.setReg(d, if (signed) signExtend(v, 16) else v);
-        },
-        0x07 => { // ld.b / ld.bu
-            const v = cpu.read8(ea);
-            cpu.setReg(d, if (signed) signExtend(v, 8) else v);
-        },
+        0x06 => cpu.setReg(d, signExtend(cpu.read16(ea), 16)), // ld.h (signed)
+        0x07 => cpu.setReg(d, signExtend(cpu.read8(ea), 8)), // ld.b (signed)
         0x08 => { // st.d (pair)
             cpu.write32(ea, cpu.getReg(d));
             cpu.write32(ea +% 4, cpu.getReg(d +% 1));
@@ -619,69 +627,54 @@ fn arithSigned(cpu: *Cpu, inst: u32, s1: u32, s2: u32, carryinout: u32, comptime
 
 /// Register-form load/store and xmem (op1 0x3d, op4 field selects the class).
 fn memRegister(cpu: *Cpu, inst: u32) StepResult {
-    const op4 = field(inst, 15, 12);
-    const ty10 = field(inst, 11, 10);
+    // The instruction class is a 6-bit subopcode in bits 15..10 (the top of the
+    // 11-bit SUBOPCODE field [15:5]; bits 8..5 are zero). Bit 9 selects the
+    // scaled-index form. Verified against the MC88100 disassembler:
+    //   0x00 xmem.bu  0x01 xmem      0x02 ld.hu   0x03 ld.bu
+    //   0x04 ld.d     0x05 ld        0x06 ld.h    0x07 ld.b (signed)
+    //   0x08 st.d     0x09 st        0x0a st.h    0x0b st.b
+    const op6 = field(inst, 15, 10);
     const scaled = field(inst, 9, 9) != 0;
     const s1 = cpu.getReg(regS1(inst));
     const s2 = cpu.getReg(regS2(inst));
     const d = regD(inst);
 
-    const size_scale: u32 = switch (ty10) {
-        0b00 => 8, // double
-        0b01 => 4, // word
-        0b10 => 2, // half
-        0b11 => 1, // byte
-        else => 1,
+    // Scaled index multiplies rS2 by the access size.
+    const scale: u32 = switch (op6) {
+        0x04, 0x08 => 8, // double
+        0x01, 0x05, 0x09 => 4, // word / xmem word
+        0x02, 0x06, 0x0a => 2, // half
+        else => 1, // byte
     };
-    const ea = if (scaled) s1 +% s2 *% size_scale else s1 +% s2;
+    const ea = if (scaled) s1 +% s2 *% scale else s1 +% s2;
 
-    switch (op4) {
-        0b0000 => { // xmem
-            switch (ty10) {
-                0b00 => { // xmem.bu
-                    const old = cpu.read8(ea);
-                    cpu.write8(ea, cpu.getReg(d));
-                    cpu.setReg(d, old);
-                },
-                0b01 => { // xmem (word)
-                    const old = cpu.read32(ea);
-                    cpu.write32(ea, cpu.getReg(d));
-                    cpu.setReg(d, old);
-                },
-                else => {},
-            }
+    switch (op6) {
+        0x00 => { // xmem.bu
+            const old = cpu.read8(ea);
+            cpu.write8(ea, cpu.getReg(d));
+            cpu.setReg(d, old);
         },
-        0b0001 => { // ld group (register form). sign in bits 13..12.
-            const sign = field(inst, 13, 12);
-            switch (ty10) {
-                0b00 => {
-                    cpu.setReg(d, cpu.read32(ea));
-                    cpu.setReg(d +% 1, cpu.read32(ea +% 4));
-                },
-                0b01 => cpu.setReg(d, cpu.read32(ea)),
-                0b10 => {
-                    const v = cpu.read16(ea);
-                    cpu.setReg(d, if (sign == 0b01) signExtend(v, 16) else v);
-                },
-                0b11 => {
-                    const v = cpu.read8(ea);
-                    cpu.setReg(d, if (sign == 0b01) signExtend(v, 8) else v);
-                },
-                else => {},
-            }
+        0x01 => { // xmem (word)
+            const old = cpu.read32(ea);
+            cpu.write32(ea, cpu.getReg(d));
+            cpu.setReg(d, old);
         },
-        0b0010 => { // st group (register form)
-            switch (ty10) {
-                0b00 => {
-                    cpu.write32(ea, cpu.getReg(d));
-                    cpu.write32(ea +% 4, cpu.getReg(d +% 1));
-                },
-                0b01 => cpu.write32(ea, cpu.getReg(d)),
-                0b10 => cpu.write16(ea, cpu.getReg(d) & 0xffff),
-                0b11 => cpu.write8(ea, cpu.getReg(d) & 0xff),
-                else => {},
-            }
+        0x02 => cpu.setReg(d, cpu.read16(ea)), // ld.hu
+        0x03 => cpu.setReg(d, cpu.read8(ea)), // ld.bu
+        0x04 => { // ld.d (register pair; rD = MS word, rD+1 = LS word)
+            cpu.setReg(d, cpu.read32(ea));
+            cpu.setReg(d +% 1, cpu.read32(ea +% 4));
         },
+        0x05 => cpu.setReg(d, cpu.read32(ea)), // ld (word)
+        0x06 => cpu.setReg(d, signExtend(cpu.read16(ea), 16)), // ld.h (signed)
+        0x07 => cpu.setReg(d, signExtend(cpu.read8(ea), 8)), // ld.b (signed)
+        0x08 => { // st.d (pair)
+            cpu.write32(ea, cpu.getReg(d));
+            cpu.write32(ea +% 4, cpu.getReg(d +% 1));
+        },
+        0x09 => cpu.write32(ea, cpu.getReg(d)), // st (word)
+        0x0a => cpu.write16(ea, cpu.getReg(d) & 0xffff), // st.h
+        0x0b => cpu.write8(ea, cpu.getReg(d) & 0xff), // st.b
         else => {},
     }
     return .normal;
