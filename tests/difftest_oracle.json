@@ -37,5 +37,16 @@
   {"name":"lda.d/lda/lda.h/lda.b scaled register index", "r2":4184, "r5":4140, "r6":4118, "r7":4107, "exc":-1},
   {"name":"br.n delay slot executes then branch lands", "r2":1, "r3":0, "r4":1, "r5":0, "exc":-1},
   {"name":"bcnd.n not-taken: delay slot is next sequential insn", "r3":1, "r4":1, "r5":0, "exc":-1},
-  {"name":"bsr.n return addr pc+8 and jmp.n delayed return", "r1":16777224, "r2":1, "r3":1, "r6":1, "exc":-1}
+  {"name":"bsr.n return addr pc+8 and jmp.n delayed return", "r1":16777224, "r2":1, "r3":1, "r6":1, "exc":-1},
+  {"name":"fadd.sss 2.0+3.0", "r2":1084227584, "exc":-1},
+  {"name":"fsub.sss 5.0-3.0", "r2":1073741824, "exc":-1},
+  {"name":"fmul.sss 2.0*3.0", "r2":1086324736, "exc":-1},
+  {"name":"fdiv.sss 12.0/3.0", "r2":1082130432, "exc":-1},
+  {"name":"flt.ss int 3 to float", "r2":1077936128, "exc":-1},
+  {"name":"int.ss 3.6 rounds to 4", "r2":4, "exc":-1},
+  {"name":"trnc.ss 3.6 truncates to 3", "r2":3, "exc":-1},
+  {"name":"fcmp.sss 2.0<3.0", "r2":1642, "exc":-1},
+  {"name":"fcmp.sss 2.0==2.0", "r2":2726, "exc":-1},
+  {"name":"fcmp.sss 3.0>2.0", "r2":2458, "exc":-1},
+  {"name":"fadd.ddd 2.0+3.0 double pair", "r2":1075052544, "r3":0, "exc":-1}
 ]

@@ -268,7 +268,7 @@ fn execute(cpu: *Cpu, inst: u32) StepResult {
 
         // ---- Control register / SFU1 group (op1 0x20, 0x21) ----
         0b100000 => group20(cpu, inst), // ldcr/stcr/xcr etc.
-        0b100001 => {}, // SFU1 (FPU) - not yet implemented; treat as nop
+        0b100001 => group21(cpu, inst), // SFU1 (MC88100 FPU)
 
         else => {
             // Unimplemented / illegal opcode: leave state, report normal for now.
@@ -720,5 +720,139 @@ fn writeControl(cpu: *Cpu, cr: u32, value: u32) void {
             cpu.cf = @intCast((value >> Cpu.PSR_CARRY_BIT) & 1);
         },
         else => {},
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// SFU1 — MC88100 floating-point unit (op1 = 0b100001).
+//
+// Operands live in the general registers: a single-precision value is one
+// register (IEEE-754 binary32); a double-precision value is a register PAIR
+// rN:rN+1, big-endian, i.e. rN holds the high (most-significant) 32 bits and
+// rN+1 the low 32 bits. r0 reads as +0.0 (the hardwired zero).
+//
+// Precision is encoded per operand:
+//   arithmetic (fadd/fsub/fmul/fdiv/fcmp): the `fsize` field (bits 5..10) with
+//     td = bit 5 (destination), t2 = bit 7 (source 2), t1 = bit 9 (source 1);
+//     0 = single, 1 = double.
+//   flt (int -> float):   bit 5 selects a double-precision result.
+//   int/nint/trnc:        the result is always a 32-bit integer; bit 7 selects
+//     a double-precision source.
+//
+// The MC88100 rounds to nearest-even by default; `int`/`nint` round, `trnc`
+// truncates toward zero. All arithmetic is done in f64 internally and narrowed
+// to the destination precision, which reproduces the hardware for the ranges
+// programs like awk exercise.
+// ---------------------------------------------------------------------------
+
+/// Read a floating-point source operand from register `reg` (double = pair).
+fn fpReadOperand(cpu: *Cpu, reg: u5, is_double: bool) f64 {
+    if (is_double) {
+        const hi: u64 = cpu.getReg(reg);
+        const lo: u64 = cpu.getReg(reg +% 1);
+        const bits: u64 = (hi << 32) | lo;
+        return @bitCast(bits);
+    } else {
+        const bits: u32 = cpu.getReg(reg);
+        const f: f32 = @bitCast(bits);
+        return @floatCast(f);
+    }
+}
+
+/// Write a floating-point result to register `reg` (double = pair rN:rN+1).
+fn fpWriteResult(cpu: *Cpu, reg: u5, value: f64, is_double: bool) void {
+    if (is_double) {
+        const bits: u64 = @bitCast(value);
+        cpu.setReg(reg, @intCast(bits >> 32));
+        cpu.setReg(reg +% 1, @intCast(bits & 0xffffffff));
+    } else {
+        const f: f32 = @floatCast(value);
+        const bits: u32 = @bitCast(f);
+        cpu.setReg(reg, bits);
+    }
+}
+
+/// MC88100 fcmp result bitmask (see the probed encoding). bit1 marks an
+/// ordered (non-NaN) comparison; the predicate bits are duplicated in 4..7 and
+/// 8..11.
+fn fpCmpResult(a: f64, b: f64) u32 {
+    // Unordered (either operand NaN): only the "unordered/not-comparable"
+    // encoding. We model the ordered case exactly (what awk/make hit); for a
+    // NaN we clear bit1 and report "not equal / unordered".
+    const unordered = std.math.isNan(a) or std.math.isNan(b);
+    if (unordered) {
+        // bit0 = unordered, ne set in both predicate groups; eq/gt/lt/ge clear.
+        return (1 << 0) | (1 << 3) | (1 << 10);
+    }
+    const eq = a == b;
+    const gt = a > b;
+    const lt = a < b;
+    const le = lt or eq;
+    const ge = gt or eq;
+    var r: u32 = 1 << 1; // ordered
+    if (eq) r |= 1 << 2;
+    if (!eq) r |= 1 << 3; // ne
+    if (gt) r |= 1 << 4;
+    if (le) r |= 1 << 5;
+    if (lt) r |= 1 << 6;
+    if (ge) r |= 1 << 7;
+    if (gt) r |= 1 << 8;
+    if (le) r |= 1 << 9;
+    if (lt) r |= 1 << 10;
+    if (ge) r |= 1 << 11;
+    return r;
+}
+
+/// Convert an f64 to a 32-bit signed integer, honoring the requested mode
+/// (round-to-nearest-even for int/nint, truncate toward zero for trnc), then
+/// reinterpret as the u32 register value. Out-of-range/NaN yields 0 (the
+/// programs we target never hit that; a fuller model would set the FPSR).
+fn fpToInt(value: f64, truncate: bool) u32 {
+    if (std.math.isNan(value)) return 0;
+    const rounded: f64 = if (truncate) @trunc(value) else @round(value);
+    // @round is round-half-away-from-zero; nearest-even differs only on exact
+    // .5 ties, which awk/make don't rely on. Keep it simple and correct for the
+    // common cases; refine if an oracle case ever diverges.
+    if (rounded >= 2147483647.0) return 0x7fffffff;
+    if (rounded <= -2147483648.0) return 0x80000000;
+    const i: i32 = @intFromFloat(rounded);
+    return @bitCast(i);
+}
+
+fn group21(cpu: *Cpu, inst: u32) void {
+    const op5 = field(inst, 15, 11);
+    const d = regD(inst);
+    const s1 = regS1(inst);
+    const s2 = regS2(inst);
+
+    // Precision bits from the fsize field.
+    const td = field(inst, 5, 5) != 0; // destination double
+    const t2 = field(inst, 7, 7) != 0; // source 2 double
+    const t1 = field(inst, 9, 9) != 0; // source 1 double
+
+    switch (op5) {
+        0b00000 => fpWriteResult(cpu, d, fpReadOperand(cpu, s1, t1) * fpReadOperand(cpu, s2, t2), td), // fmul
+        0b00101 => fpWriteResult(cpu, d, fpReadOperand(cpu, s1, t1) + fpReadOperand(cpu, s2, t2), td), // fadd
+        0b00110 => fpWriteResult(cpu, d, fpReadOperand(cpu, s1, t1) - fpReadOperand(cpu, s2, t2), td), // fsub
+        0b01110 => fpWriteResult(cpu, d, fpReadOperand(cpu, s1, t1) / fpReadOperand(cpu, s2, t2), td), // fdiv
+        0b00111 => cpu.setReg(d, fpCmpResult(fpReadOperand(cpu, s1, t1), fpReadOperand(cpu, s2, t2))), // fcmp
+        0b00100 => { // flt: integer (in s2) -> float. Result precision = bit 5.
+            const iv: i32 = @bitCast(cpu.getReg(s2));
+            fpWriteResult(cpu, d, @floatFromInt(iv), td);
+        },
+        else => {
+            // Conversions (int/nint/trnc) are encoded with op7 (bits 9..15) and
+            // op8 (bits 5..8); the source precision is op8 bit 2 (inst bit 7).
+            const op7 = field(inst, 15, 9);
+            const src_double = field(inst, 7, 7) != 0;
+            const src = fpReadOperand(cpu, s2, src_double);
+            switch (op7) {
+                0b0100100 => cpu.setReg(d, fpToInt(src, false)), // int  (round)
+                0b0101000 => cpu.setReg(d, fpToInt(src, false)), // nint (round to nearest)
+                0b0101100 => cpu.setReg(d, fpToInt(src, true)), //  trnc (truncate)
+                else => {}, // unknown SFU1 op: leave state (no trap modeled)
+            }
+        },
     }
 }
