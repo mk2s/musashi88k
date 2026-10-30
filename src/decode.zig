@@ -495,8 +495,17 @@ fn group3d(cpu: *Cpu, inst: u32) StepResult {
     const s2 = cpu.getReg(regS2(inst));
     const carryinout = field(inst, 9, 8);
 
-    // Arithmetic with carry variants share op6 (bits 15..10); the carry mode is
-    // in bits 9..8 and the low bits (7..5) must be zero.
+    // The non-bit-field triadic ALU/compare ops are decoded from op6
+    // (bits 15..10) ALONE. On the MC88100 the width field (bits 9..5) is a
+    // don't-care for these instructions and is NOT part of their opcode: real
+    // silicon executes e.g. `cmp` identically whether bits 9..5 are 0 or not.
+    // (Verified on nono: 0xf5597c00 and 0xf5597d00 both compute the same cmp
+    // bitstring.) Only the bit-field group (clr/set/ext/extu/mak/rot) and the
+    // ff1/ff0/jmp/jsr/tbnd/rte control ops use the full field, so those stay in
+    // the exact-match switch below. Matching these here on op6 fixes guest code
+    // (UTek libc) that emits a nonzero width field on cmp/and/or/etc.
+    //
+    // The carry mode for add/addu/sub/subu is in bits 9..8.
     const op6 = field(inst, 15, 10);
     switch (op6) {
         0b011000 => { // addu (unsigned, never overflow-traps)
@@ -513,6 +522,47 @@ fn group3d(cpu: *Cpu, inst: u32) StepResult {
         },
         0b011101 => { // sub (signed): overflow-traps on the plain form
             arithSigned(cpu, inst, s1, s2, carryinout, .sub);
+            return .normal;
+        },
+        // Logical / compare / mul / div: op6-only, width field (9..5) ignored.
+        0b010000 => {
+            setD(cpu, inst, s1 & s2); // and
+            return .normal;
+        },
+        0b010001 => {
+            setD(cpu, inst, s1 & ~s2); // and.c
+            return .normal;
+        },
+        0b010110 => {
+            setD(cpu, inst, s1 | s2); // or
+            return .normal;
+        },
+        0b010111 => {
+            setD(cpu, inst, s1 | ~s2); // or.c
+            return .normal;
+        },
+        0b010100 => {
+            setD(cpu, inst, s1 ^ s2); // xor
+            return .normal;
+        },
+        0b010101 => {
+            setD(cpu, inst, s1 ^ ~s2); // xor.c
+            return .normal;
+        },
+        0b011111 => {
+            setD(cpu, inst, cmpResult(s1, s2)); // cmp
+            return .normal;
+        },
+        0b011011 => {
+            setD(cpu, inst, s1 *% s2); // mul
+            return .normal;
+        },
+        0b011010 => {
+            divuOp(cpu, inst, s1, s2); // divu
+            return .normal;
+        },
+        0b011110 => {
+            divSignedOp(cpu, inst, s1, s2); // div (signed)
             return .normal;
         },
         else => {},
